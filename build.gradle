@@ -1,0 +1,140 @@
+buildscript {
+    repositories { maven { url = 'https://maven.fabricmc.net/' }; mavenCentral(); gradlePluginPortal() }
+    dependencies { classpath 'net.fabricmc:fabric-loom:1.17.21' }
+}
+def mc = project.minecraft_version.toString()
+def modern = mc.startsWith('26.')
+apply plugin: modern ? 'net.fabricmc.fabric-loom' : 'net.fabricmc.fabric-loom-remap'
+apply plugin: 'maven-publish'
+if (!modern) {
+    loom { mixin { useLegacyMixinAp = true; defaultRefmapName = 'jukebox.refmap.json' } }
+}
+
+group = 'io.github.cloraj1.jukebox'
+version = "${mod_version}+${mc}"
+base { archivesName = 'jukebox' }
+def targets = new groovy.json.JsonSlurper().parse(file('versions.json'))
+def target = targets.find { it.minecraft == mc }
+if (target == null) throw new GradleException("Unsupported Minecraft target: ${mc}")
+def javaTarget = target.java as int
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://maven.terraformersmc.com/releases/'; content { includeGroup 'com.terraformersmc' } }
+    maven { url = 'https://maven.maxhenkel.de/repository/public'; content { includeGroup 'de.maxhenkel.voicechat' } }
+}
+dependencies {
+    minecraft "com.mojang:minecraft:${mc}"
+    if (!modern) mappings loom.officialMojangMappings()
+    if (modern) {
+        implementation 'net.fabricmc:fabric-loader:0.19.5'
+        implementation "net.fabricmc.fabric-api:fabric-api:${target.fabric}"
+        compileOnly("com.terraformersmc:modmenu:${target.modmenu}") { transitive = false }
+    } else {
+        modImplementation 'net.fabricmc:fabric-loader:0.19.5'
+        modImplementation "net.fabricmc.fabric-api:fabric-api:${target.fabric}"
+        modCompileOnly("com.terraformersmc:modmenu:${target.modmenu}") { transitive = false }
+    }
+    implementation include('javazoom:jlayer:1.0.1')
+    compileOnly 'de.maxhenkel.voicechat:voicechat-api:2.6.13'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+java { withSourcesJar() }
+tasks.withType(JavaCompile).configureEach { options.release = javaTarget; options.encoding = 'UTF-8' }
+test {
+    useJUnitPlatform()
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(javaTarget) }
+}
+tasks.register('layoutPreview', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.github.cloraj1.jukebox.LayoutPreview'
+    if (project.hasProperty('preview_args')) args project.preview_args.toString().split('\\|').toList()
+    if (project.hasProperty('preview_output')) args project.preview_output, project.preview_font, project.preview_scratch
+}
+tasks.register('urlToolsSmoke', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.github.cloraj1.jukebox.UrlToolsSmoke'
+    args project.findProperty('tools_folder') ?: '../../work/url-smoke-tools'
+    if (project.hasProperty('smoke_url')) args project.smoke_url
+}
+
+def generated = layout.buildDirectory.dir('generated/jukebox')
+sourceSets.main.java.srcDir(generated)
+tasks.register('generateBridge') {
+    inputs.dir('templates'); inputs.property('minecraft', mc); outputs.dir(generated)
+    doLast {
+        def old120 = mc == '1.20' || mc.startsWith('1.20.')
+        def eventInput = modern || (!old120 && mc.tokenize('.').last().toInteger() >= 9 && mc != '1.21')
+        def id = modern || mc == '1.21.11' ? 'Identifier' : 'ResourceLocation'
+        def graphics = modern ? 'GuiGraphicsExtractor' : 'GuiGraphics'
+        def render = modern ? 'extractRenderState' : 'render'
+        def drawing = modern ? 'text' : 'drawString'
+        def keyCategory = eventInput ? "KeyMapping.Category.register(${id}.fromNamespaceAndPath(\"jukebox\", \"main\"))" : '"key.categories.jukebox"'
+        def click = eventInput ? 'net.minecraft.client.input.MouseButtonEvent e, boolean doubled' : 'double x, double y, int button'
+        def clickArgs = eventInput ? 'e.x(), e.y(), e.button()' : 'x, y, button'
+        def superClick = eventInput ? 'e, doubled' : 'x, y, button'
+        def drag = eventInput ? 'net.minecraft.client.input.MouseButtonEvent e, double dx, double dy' : 'double x, double y, int button, double dx, double dy'
+        def dragArgs = eventInput ? 'e.x(), e.y(), e.button()' : 'x, y, button'
+        def superDrag = eventInput ? 'e, dx, dy' : 'x, y, button, dx, dy'
+        def release = eventInput ? 'net.minecraft.client.input.MouseButtonEvent e' : 'double x, double y, int button'
+        def key = eventInput ? 'net.minecraft.client.input.KeyEvent e' : 'int key, int scan, int modifiers'
+        def keyArg = eventInput ? 'JukeBoxKeys.uiKey(e.key())' : 'JukeBoxKeys.uiKey(key)'
+        def superKey = eventInput ? 'e' : 'key, scan, modifiers'
+        def legacyToast = old120 || mc in ['1.21','1.21.1']
+        def patchNumber = modern ? 99 : old120 || mc == '1.21' ? 0 : mc.tokenize('.').last().toInteger()
+        def toastMethods = legacyToast ? '''
+    @Override public Visibility render(GuiGraphics graphics,net.minecraft.client.gui.components.toasts.ToastComponent manager,long time) {
+        draw(graphics,manager.getMinecraft().font);
+        return JukeBoxClient.noticeVisible() && !Config.get().alwaysPlaybackNotification?Visibility.SHOW:Visibility.HIDE;
+    }''' : """
+    @Override public Visibility getWantedVisibility() { return JukeBoxClient.noticeVisible() && !Config.get().alwaysPlaybackNotification?Visibility.SHOW:Visibility.HIDE; }
+    @Override public void update(net.minecraft.client.gui.components.toasts.ToastManager manager,long time) {}
+    @Override public void ${render}(${graphics} graphics,Font font,long time) { draw(graphics,font); }
+"""
+        def artBlit = patchNumber < 2 ? 'g.blit(texture.id(),x,y,size,size,0f,0f,AlbumArt.SIDE,AlbumArt.SIDE,AlbumArt.SIDE,AlbumArt.SIDE)' :
+            patchNumber < 6 ? 'g.blit(net.minecraft.client.renderer.RenderType::guiTextured,texture.id(),x,y,0f,0f,size,size,AlbumArt.SIDE,AlbumArt.SIDE,AlbumArt.SIDE,AlbumArt.SIDE)' :
+            'g.blit(net.minecraft.client.renderer.RenderPipelines.GUI_TEXTURED,texture.id(),x,y,0f,0f,size,size,AlbumArt.SIDE,AlbumArt.SIDE,AlbumArt.SIDE,AlbumArt.SIDE)'
+        def replacements = [GRAPHICS:graphics, RENDER:render, DRAW:drawing, IDENTIFIER:id,
+            CATEGORY:keyCategory, CLICK:click, CLICK_ARGS:clickArgs, SUPER_CLICK:superClick,
+            DRAG:drag, DRAG_ARGS:dragArgs, SUPER_DRAG:superDrag, RELEASE:release, RELEASE_ARGS:eventInput ? 'e.x(), e.y(), e.button()' : 'x, y, button',
+            KEY:key, KEY_ARG:keyArg, KEY_MATCH_ARGS:eventInput ? 'e' : 'key, scan', SUPER_KEY:superKey, SUPER_CLICK_RELEASE:eventInput ? 'e' : 'x, y, button',
+            KEY_HELPER_PACKAGE:modern ? 'keymapping' : 'keybinding', KEY_HELPER:modern ? 'KeyMappingHelper' : 'KeyBindingHelper',
+            KEY_REGISTER:modern ? 'registerKeyMapping' : 'registerKeyBinding', KEY_TYPE:mc == '26.3' ? 'KEYBOARD' : 'KEYSYM',
+            ACTIONBAR:modern ? 'sendOverlayMessage' : 'displayClientMessage', ACTIONBAR_EXTRA:modern ? '' : ',true',
+            TOAST_METHODS:toastMethods, TOAST_GET:mc in ['26.2','26.3'] ? 'gui.toastManager()' : legacyToast ? 'getToasts()' : 'getToastManager()',
+            TOAST_MANAGER:legacyToast ? 'net.minecraft.client.gui.components.toasts.ToastComponent' : 'net.minecraft.client.gui.components.toasts.ToastManager',
+            PIN_STRATUM:patchNumber >= 6 ? 'graphics.nextStratum();' : '',
+            MENU_PARAMETERS:eventInput ? 'screenEvent, eventKey' : 'screenEvent, keyCode, scanCode, modifiers',
+            MENU_MATCH_ARGS:eventInput ? 'eventKey' : 'keyCode, scanCode',
+            ART_TEXTURE_EXTRA:patchNumber >= 5 ? '() -> "JukeBox album art", ' : '',
+            ART_PIXEL:patchNumber < 2 ? 'setPixelRGBA' : 'setPixel',
+            ART_COLOR:patchNumber < 2 ? '(color&0xFF00FF00)|((color>>>16)&255)|((color&255)<<16)' : 'color', ART_BLIT:artBlit,
+            SCREEN_GET:mc in ['26.2','26.3'] ? 'gui.screen()' : 'screen', SCREEN_SET:mc in ['26.2','26.3'] ? 'gui.setScreen' : 'setScreen']
+        replacements.putAll([
+            ART_ID:old120 ? 'new ResourceLocation("jukebox","album/"+serial++)' : "${id}.fromNamespaceAndPath(\"jukebox\",\"album/\"+serial++)",
+            SCROLL:mc in ['1.20','1.20.1'] ? 'double x,double y,double vertical' : 'double x,double y,double horizontal,double vertical',
+            SUPER_SCROLL:mc in ['1.20','1.20.1'] ? 'x,y,vertical' : 'x,y,horizontal,vertical',
+            BACKGROUND_RENDER:modern ? 'extractBackground' : 'renderBackground',
+            BACKGROUND_PARAMETERS:mc in ['1.20','1.20.1'] ? "${graphics} g" : "${graphics} g, int x, int y, float delta"
+        ])
+        fileTree('templates').matching { include '**/*.java' }.each { f ->
+            if (f.name == 'NativePlaylistPicker.java' && mc == '26.3') return
+            if (f.name == 'NativePlaylistPickerSdl.java' && mc != '26.3') return
+            def content = f.getText('UTF-8')
+            replacements.each { k,v -> content = content.replace("@${k}@", v) }
+            def dest = new File(generated.get().asFile, f.name == 'NativePlaylistPickerSdl.java' ? 'NativePlaylistPicker.java' : f.name)
+            dest.parentFile.mkdirs(); dest.setText(content, 'UTF-8')
+        }
+    }
+}
+compileJava.dependsOn generateBridge
+sourcesJar.dependsOn generateBridge
+processResources {
+    inputs.property 'version', version; inputs.property 'mc', mc
+    filesMatching('fabric.mod.json') { expand(version: mod_version, minecraft: mc, java: javaTarget) }
+    filesMatching('jukebox.mixins.json') { expand(java: javaTarget, refmap: modern ? '' : '"refmap": "jukebox.refmap.json",') }
+}
+jar { from('LICENSE'); from('NOTICE.md'); from('third_party/JLayer-LGPL-2.1.txt') { into 'third_party' } }

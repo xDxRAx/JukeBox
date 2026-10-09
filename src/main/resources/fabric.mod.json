@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "jukebox",
+  "version": "${version}",
+  "name": "JukeBox",
+  "icon": "assets/jukebox/icon.png",
+  "description": "This mod adds a media player that can play music from your local MP3 library or via YouTube links within the game",
+  "authors": ["cloraj1"],
+  "contributors": [],
+  "license": "MIT",
+  "environment": "client",
+  "mixins": ["jukebox.mixins.json"],
+  "entrypoints": {
+    "client": ["io.github.cloraj1.jukebox.JukeBoxClient"],
+    "modmenu": ["io.github.cloraj1.jukebox.JukeBoxModMenu"],
+    "voicechat": ["io.github.cloraj1.jukebox.JukeBoxVoicechatPlugin"]
+  },
+  "depends": {"fabricloader": ">=0.19.5", "fabric-api": "*", "minecraft": "${minecraft}", "java": ">=${java}"},
+  "suggests": {"modmenu": "*", "voicechat": "*"}
+}

@@ -1,0 +1,8 @@
+{
+  "required": true,
+  "package": "io.github.cloraj1.jukebox.mixin",
+  "compatibilityLevel": "JAVA_${java}",
+  ${refmap}
+  "client": ["JukeBoxToastMixin"],
+  "injectors": {"defaultRequire": 1}
+}
